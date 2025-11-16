@@ -16,8 +16,9 @@ lockfile. For instance, in a [workspace](workspaces.md) with a shared lockfile,
 
 | Hook Function                                         | Process                                                    | Uses                                               |
 |-------------------------------------------------------|------------------------------------------------------------|----------------------------------------------------|
-| `hooks.readPackage(pkg, context): pkg`                | Called after pnpm parses the dependency's package manifest | Allows you to mutate a dependency's `package.json` |
+| `hooks.readPackage(pkg, context): pkg`                | Called after pnpm parses the dependency's package manifest | Allows you to mutate a dependency's `package.json`. |
 | `hooks.afterAllResolved(lockfile, context): lockfile` | Called after the dependencies have been resolved.          | Allows you to mutate the lockfile.                 |
+| `hooks.adapters`                                      | Called throughout package resolution.              | Allows you to register custom resolvers and fetchers.       |
 
 ### `hooks.readPackage(pkg, context): pkg | Promise<pkg>`
 
@@ -57,12 +58,12 @@ function readPackage(pkg, context) {
     }
     context.log('bar@1 => bar@2 in dependencies of foo')
   }
-  
+
   // This will change any packages using baz@x.x.x to use baz@1.2.3
   if (pkg.dependencies.baz) {
     pkg.dependencies.baz = '1.2.3';
   }
-  
+
   return pkg
 }
 
@@ -173,6 +174,225 @@ This hook allows to override the fetchers that are used for different types of d
 * `gitHostedTarball`
 * `directory`
 * `git`
+
+### `hooks.adapters`
+
+Added in: v11.0.0
+
+Adapters extend pnpm's resolution and fetching logic to support custom package sources, protocols, or package management systems.
+
+#### Adapter Interface
+
+An adapter is an object that can implement any combination of the following methods:
+
+##### `canResolve(descriptor): boolean | Promise<boolean>`
+
+Determines whether this adapter can resolve a given package descriptor.
+
+**Arguments:**
+- `descriptor` - Object with:
+  - `name` - The package name
+  - `range` - The version range or specifier
+
+**Returns:** `true` if this adapter can resolve the package, `false` otherwise. This determines whether `resolve` will be called.
+
+##### `resolve(descriptor, opts): ResolveResult | Promise<ResolveResult>`
+
+Resolves a package descriptor to specific package metadata and resolution information.
+
+**Arguments:**
+- `descriptor` - The package descriptor (same as `canResolve`)
+- `opts` - Object with:
+  - `lockfileDir` - Directory containing the lockfile
+  - `projectDir` - The project root directory
+  - `preferredVersions` - Map of package names to preferred versions
+
+**Returns:** Object with:
+- `id` - Unique package identifier (e.g., `'custom-pkg@1.0.0'`)
+- `resolution` - Resolution metadata. This can be:
+  - Standard resolution (e.g., `{ tarball: 'https://...' }`)
+  - Custom resolution with scoped type (e.g., `{ type: '@company/cdn', url: '...' }`)
+
+Custom resolutions must be handled with `canFetch`/`fetch`.
+
+:::warning Custom Resolution Types
+
+Custom resolutions must use an `@`-scoped type (e.g., `@company/custom-type`) to avoid conflicts with pnpm's built-in resolution types (`tarball`, `directory`, `git`, `binary`).
+
+:::
+
+##### `shouldForceResolve(descriptor): boolean | Promise<boolean>`
+
+Determines whether packages matching this descriptor should be re-resolved even during headless installs.
+
+**Arguments:**
+- `descriptor` - The package descriptor (same as `canResolve`)
+
+**Returns:** `true` to force re-resolution, `false` otherwise.
+
+This is useful when you want to update a package with your `resolve` function even if the lockfile is up-to-date.
+
+:::note
+
+`shouldForceResolve` is skipped during frozen lockfile installs, as no resolution is allowed in that mode.
+
+:::
+
+##### `canFetch(pkgId, resolution): boolean | Promise<boolean>`
+
+Determines whether this adapter can fetch a package with the given resolution.
+
+**Arguments:**
+- `pkgId` - The unique package identifier from the resolution phase
+- `resolution` - The resolution object from the `resolve` method
+
+**Returns:** `true` if this adapter can fetch the package, `false` otherwise.
+
+##### `fetch(cafs, resolution, opts, fetchers): FetchResult | Promise<FetchResult>`
+
+Fetches package files and returns metadata about the fetched package.
+
+**Arguments:**
+- `cafs` - Content-addressable file system interface for storing files
+- `resolution` - The resolution object (same as passed to `canFetch`)
+- `opts` - Fetch options including:
+  - `lockfileDir` - Directory containing the lockfile
+  - `filesIndexFile` - Path for the files index
+  - `onStart` - Optional callback when fetch starts
+  - `onProgress` - Optional progress callback
+- `fetchers` - Object containing pnpm's standard fetchers for delegation:
+  - `remoteTarball` - Fetcher for remote tarballs
+  - `localTarball` - Fetcher for local tarballs
+  - `gitHostedTarball` - Fetcher for GitHub/GitLab/Bitbucket tarballs
+  - `directory` - Fetcher for local directories
+  - `git` - Fetcher for git repositories
+
+**Returns:** Object with:
+- `filesIndex` - Map of relative file paths to their physical locations. For remote packages, these are paths in pnpm's content-addressable store (CAFS). For local packages (when `local: true`), these are absolute paths to files on disk.
+- `manifest` - Optional. The package.json from the fetched package. If not provided, pnpm will read it from disk when needed. Providing it avoids an extra file I/O operation and is recommended when you have the manifest data readily available (e.g., already parsed during fetch).
+- `requiresBuild` - Boolean indicating whether the package has build scripts that need to be executed. Set to `true` if the package has `preinstall`, `install`, or `postinstall` scripts, or contains `binding.gyp` or `.hooks/` files. Standard fetchers determine this automatically using the manifest and file list.
+- `local` - Optional. Set to `true` to load the package directly from disk without copying to pnpm's store. When `true`, `filesIndex` should contain absolute paths to files on disk, and pnpm will hardlink them to `node_modules` instead of copying. This is how the directory fetcher handles local dependencies (e.g., `file:../my-package`).
+
+:::tip Delegating to Standard Fetchers
+
+Custom fetchers can delegate to pnpm's built-in fetchers using the `fetchers` parameter.
+
+:::
+
+#### Usage Examples
+
+##### Basic Custom Resolver
+
+This example shows an adapter that resolves packages from a custom registry:
+
+```js title=".pnpmfile.cjs"
+module.exports = {
+  hooks: {
+    adapters: [
+      {
+        // Only handle packages with @company scope
+        canResolve: (descriptor) => {
+          return descriptor.name.startsWith('@company/')
+        },
+
+        resolve: async (descriptor, opts) => {
+          // Fetch metadata from custom registry
+          const response = await fetch(
+            `https://custom-registry.company.com/${descriptor.name}/${descriptor.range}`
+          )
+          const metadata = await response.json()
+
+          return {
+            id: `${metadata.name}@${metadata.version}`,
+            resolution: {
+              tarball: metadata.tarballUrl,
+              integrity: metadata.integrity
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+##### Basic Custom Fetcher
+
+This example shows an adapter that tells pnpm to fetch certain packages from a different source than the one specified in the package resolution.
+
+```js title=".pnpmfile.cjs"
+module.exports = {
+  hooks: {
+    adapters: [
+      {
+        canFetch: (pkgId, resolution) => {
+          return pkgId.startsWith('@company/')
+        },
+
+        fetch: async (cafs, resolution, opts, fetchers) => {
+          // Delegate to pnpm's tarball fetcher
+          const tarballResolution = {
+            tarball: resolution.tarballUrl.replace(
+              `https://registry.npmjs.org/`,
+              `https://custom-registry.company.com/`
+            ),
+            integrity: resolution.integrity
+          }
+
+          return fetchers.remoteTarball(cafs, tarballResolution, opts)
+        }
+      }
+    ]
+  }
+}
+```
+
+##### Custom Resolution Type
+
+This example shows an adapter with both a custom resolver and a custom fetcher, providing full control over lockfile entries.
+
+```js title=".pnpmfile.cjs"
+module.exports = {
+  hooks: {
+    adapters: [
+      {
+        canResolve: (descriptor) => {
+          return descriptor.name.startsWith('@internal/')
+        },
+
+        resolve: async (descriptor) => {
+          return {
+            id: `${descriptor.name}@${descriptor.range}`,
+            resolution: {
+              type: '@company/internal',
+              directory: `/packages/${descriptor.name}/${descriptor.range}`
+            }
+          }
+        },
+
+        canFetch: (pkgId, resolution) => {
+          return resolution.type === '@company/internal'
+        },
+
+        fetch: async (cafs, resolution, opts, fetchers) => {
+          // Delegate to pnpm's directory fetcher for local packages
+          // Transform custom resolution to standard directory resolution
+          const directoryResolution = {
+            type: 'directory',
+            directory: resolution.directory
+          }
+
+          return fetchers.directory(cafs, directoryResolution, opts)
+        }
+      }
+    ]
+  }
+}
+```
+
+#### Adapter Priority
+
+When multiple adapters are provided, they are checked in order. The first adapter where `canResolve` returns `true` will be used for resolution. The same applies for `canFetch` during the fetch phase.
 
 ## Finders
 
