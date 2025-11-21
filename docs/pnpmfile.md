@@ -185,23 +185,23 @@ Adapters extend pnpm's resolution and fetching logic to support custom package s
 
 An adapter is an object that can implement any combination of the following methods:
 
-##### `canResolve(descriptor): boolean | Promise<boolean>`
+##### `canResolve(wantedDependency): boolean | Promise<boolean>`
 
-Determines whether this adapter can resolve a given package descriptor.
+Determines whether this adapter can resolve a given wanted dependency.
 
 **Arguments:**
-- `descriptor` - Object with:
-  - `name` - The package name
-  - `range` - The version range or specifier
+- `wantedDependency` - Object with:
+  - `alias` - The package name or alias as it appears in package.json
+  - `bareSpecifier` - The version range, git URL, file path, or other specifier
 
 **Returns:** `true` if this adapter can resolve the package, `false` otherwise. This determines whether `resolve` will be called.
 
-##### `resolve(descriptor, opts): ResolveResult | Promise<ResolveResult>`
+##### `resolve(wantedDependency, opts): ResolveResult | Promise<ResolveResult>`
 
-Resolves a package descriptor to specific package metadata and resolution information.
+Resolves a wanted dependency to specific package metadata and resolution information.
 
 **Arguments:**
-- `descriptor` - The package descriptor (same as `canResolve`)
+- `wantedDependency` - The wanted dependency (same as `canResolve`)
 - `opts` - Object with:
   - `lockfileDir` - Directory containing the lockfile
   - `projectDir` - The project root directory
@@ -221,12 +221,12 @@ Custom resolutions must use an `@`-scoped type (e.g., `@company/custom-type`) to
 
 :::
 
-##### `shouldForceResolve(descriptor): boolean | Promise<boolean>`
+##### `shouldForceResolve(wantedDependency): boolean | Promise<boolean>`
 
-Determines whether packages matching this descriptor should be re-resolved even during headless installs.
+Determines whether packages matching this wanted dependency should be re-resolved even during headless installs.
 
 **Arguments:**
-- `descriptor` - The package descriptor (same as `canResolve`)
+- `wantedDependency` - The wanted dependency (same as `canResolve`)
 
 **Returns:** `true` to force re-resolution, `false` otherwise.
 
@@ -291,14 +291,14 @@ module.exports = {
     adapters: [
       {
         // Only handle packages with @company scope
-        canResolve: (descriptor) => {
-          return descriptor.name.startsWith('@company/')
+        canResolve: (wantedDependency) => {
+          return wantedDependency.alias.startsWith('@company/')
         },
 
-        resolve: async (descriptor, opts) => {
+        resolve: async (wantedDependency, opts) => {
           // Fetch metadata from custom registry
           const response = await fetch(
-            `https://custom-registry.company.com/${descriptor.name}/${descriptor.range}`
+            `https://custom-registry.company.com/${wantedDependency.alias}/${wantedDependency.bareSpecifier}`
           )
           const metadata = await response.json()
 
@@ -356,16 +356,16 @@ module.exports = {
   hooks: {
     adapters: [
       {
-        canResolve: (descriptor) => {
-          return descriptor.name.startsWith('@internal/')
+        canResolve: (wantedDependency) => {
+          return wantedDependency.alias.startsWith('@internal/')
         },
 
-        resolve: async (descriptor) => {
+        resolve: async (wantedDependency) => {
           return {
-            id: `${descriptor.name}@${descriptor.range}`,
+            id: `${wantedDependency.alias}@${wantedDependency.bareSpecifier}`,
             resolution: {
               type: '@company/internal',
-              directory: `/packages/${descriptor.name}/${descriptor.range}`
+              directory: `/packages/${wantedDependency.alias}/${wantedDependency.bareSpecifier}`
             }
           }
         },
